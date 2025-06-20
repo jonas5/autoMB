@@ -46,7 +46,7 @@ local ahgo = {
 * event: load
 * desc : Event called when the addon is being loaded.
 --]]
-ashita.events.register('load', 'load_cb', function ()
+ashita.events.register('load', 'ahgo_load', function ()
     -- Find the ahgo auction pointer..
     local pointer = ashita.memory.find('FFXiMain.dll', 0, 'DFE02500410000DDD8????8B46086A0150', 0, 0);
     if (pointer == 0) then
@@ -78,7 +78,7 @@ end);
 * event: command
 * desc : Event called when the addon is processing a command.
 --]]
-ashita.events.register('command', 'command_cb', function (e)
+ashita.events.register('command', 'ahgo_command', function (e)
     -- Parse the command arguments..
     local args = e.command:args();
     if (#args == 0 or args[1] ~= '/ah') then

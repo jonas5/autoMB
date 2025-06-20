@@ -112,7 +112,7 @@ end);
 * event: load
 * desc : Event called when the addon is being loaded.
 --]]
-ashita.events.register('load', 'load_cb', function ()
+ashita.events.register('load', 'clock_load', function ()
     -- Prepare the clock font object..
     clock.font = fonts.new(clock.settings.font);
 end);
@@ -121,7 +121,7 @@ end);
 * event: unload
 * desc : Event called when the addon is being unloaded.
 --]]
-ashita.events.register('unload', 'unload_cb', function ()
+ashita.events.register('unload', 'clock_unload', function ()
     -- Cleanup the clock font object..
     if (clock.font ~= nil) then
         clock.font:destroy();
@@ -133,7 +133,7 @@ end);
 * event: command
 * desc : Event called when the addon is processing a command.
 --]]
-ashita.events.register('command', 'command_cb', function (e)
+ashita.events.register('command', 'clock_command', function (e)
     -- Parse the command arguments..
     local args = e.command:args();
     if (#args == 0 or not args[1]:any('/time')) then
@@ -326,7 +326,7 @@ end);
 * event: d3d_present
 * desc : Event called when the Direct3D device is presenting a scene.
 --]]
-ashita.events.register('d3d_present', 'present_cb', function ()
+ashita.events.register('d3d_present', 'clock_d3d_present', function ()
     if (clock.settings.clocks:empty() or clock.font == nil) then
         if (clock.font ~= nil) then
             clock.font.text = '';

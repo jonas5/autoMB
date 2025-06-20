@@ -33,23 +33,90 @@ job/level is pulled from game and appropriate elements are used
 single bursting only for now, but double may me introduced later
 
 ]]
-_addon.version = '1.3.4'
-_addon.name = 'autoMB'
-_addon.author = 'Ekrividus'
-_addon.commands = {'autoMB','amb'}
-_addon.lastUpdate = '1/12/2023'
-_addon.windower = '4'
+addon.version = '1.3.4'
+addon.name = 'autoMB'
+addon.author = 'Ekrividus'
+addon.desc = 'autoMB will cast elements for magic bursts automatically.'
+addon.link = 'https://www.ashitaxi.com/'
+-- _addon.commands = {'autoMB','amb'}
+-- _addon.lastUpdate = '1/12/2023'
+-- _addon.windower = '4'
 
-require 'tables'
-require 'strings'
-require 'logger'
+-- require 'tables'
+-- require 'strings'
+-- require 'logger'
 
-res = require('resources')
-config = require('config')
-chat = require('chat')
-packets = require('packets')
+-- res = require('resources')
+-- config = require('config')
+-- chat = require('chat') -- Windower's chat
+-- packets = require('packets')
 
-defaults = T{}
+local ashita_chat = require('chat')
+local settings_manager = require('settings')
+local common = require('common') -- Assuming this provides table/string utils, or we add them
+local resource_manager = AshitaCore:GetResourceManager()
+if resource_manager == nil then
+    error("autoMB: Failed to get AshitaCore Resource Manager!")
+end
+local packet_manager = AshitaCore:GetPacketManager()
+if packet_manager == nil then
+    error("autoMB: Failed to get AshitaCore Packet Manager!")
+end
+
+local weather_memory_pointer = nil
+-- local struct = require('struct') -- Assuming Ashita's environment provides struct or it's manually added.
+                                 -- If not, this will need to be handled, possibly with manual byte functions.
+                                 -- For now, proceeding as if struct.unpack is available.
+local struct; -- Declare struct
+pcall(function() struct = require('struct') end); -- Safely require struct
+if not struct then
+    print(addon.name .. ": Error - 'struct' library not found. Packet parsing will fail. Please ensure 'struct.lua' is available.")
+    -- Optionally, could implement basic manual unpackers here for critical fields if struct is truly unavailable.
+end
+
+
+-- Helper function (can be moved to common.lua or replaced if available)
+local function table_contains(tbl, val)
+    for _, value in ipairs(tbl) do
+        if value == val then
+            return true
+        end
+    end
+    return false
+end
+
+local weather_id_to_element_map = {
+    [0] = 'Clear', [1] = 'Sunshine', [2] = 'Clouds', [3] = 'Fog',
+    [4] = 'Fire', [5] = 'Fire', [6] = 'Water', [7] = 'Water',
+    [8] = 'Earth', [9] = 'Earth', [10] = 'Wind', [11] = 'Wind',
+    [12] = 'Ice', [13] = 'Ice', [14] = 'Thunder', [15] = 'Thunder',
+    [16] = 'Light', [17] = 'Light', [18] = 'Dark', [19] = 'Dark',
+}
+
+local vanadiel_day_to_element_map = {
+    [0] = 'Fire',    -- Firesday
+    [1] = 'Earth',   -- Earthsday
+    [2] = 'Water',   -- Watersday
+    [3] = 'Wind',    -- Windsday
+    [4] = 'Ice',     -- Iceday
+    [5] = 'Thunder', -- Lightningday
+    [6] = 'Light',   -- Lightsday
+    [7] = 'Dark'     -- Darksday
+}
+
+-- Helper function for string splitting
+local function string_split(inputstr, sep)
+    if sep == nil then
+        sep = "%s"
+    end
+    local t = {}
+    for str in string.gmatch(inputstr, "([^"..sep.."]+)") do
+        table.insert(t, str)
+    end
+    return t
+end
+
+local defaults = {}
 defaults.frequency = 10 -- How many times per second to update skillchain effects
 defaults.show_skillchain = false -- Whether or not to show skillchain name
 defaults.show_elements = false -- Whether or not to show skillchain element info
@@ -72,11 +139,11 @@ defaults.cast_range = 22 -- Maximum range for target to be recognized
 -- Newly added setting
 defaults.disable_on_zone = false -- Disable when zoning
 
-settings = config.load(defaults)
+local settings = settings_manager.load(defaults)
 -- Add missing settings
 settings.cast_range  = settings.cast_range or 21
 
-local skillchains = T{
+local skillchains = {
 	[288] = {id=288,english='Light',elements={'Light','Thunder','Wind','Fire'}},
 	[289] = {id=289,english='Darkness',elements={'Dark','Ice','Water','Earth'}},
 	[290] = {id=290,english='Gravitation',elements={'Dark','Earth'}},
@@ -178,8 +245,8 @@ local player = nil
 local last_packet_time = 0
 local min_packet_time = 0.05
 
-local finish_act = L{2,3,5}
-local start_act = L{7,8,9,12}
+local finish_act = {2,3,5}
+local start_act = {7,8,9,12}
 local is_busy = 0
 local is_casting = false
 local is_bursting = false
@@ -197,9 +264,9 @@ function message(text, to_log)
 	end
 
 	if (to_log) then
-		log(text)
+		print(addon.name .. ': ' .. text) -- Log to console
 	else
-		windower.add_to_chat(207, _addon.name..": "..text)
+		print(ashita_chat.prefix(addon.name):append(ashita_chat.message(text)))
 	end
 end
 
@@ -209,9 +276,9 @@ function debug_message(text, to_log)
 	end
 
 	if (to_log) then
-		log("(debug): "..text)
+		print(addon.name .. '(debug): ' .. text) -- Log to console
 	else
-		windower.add_to_chat(207, _addon.name.."(debug): "..text)
+		print(ashita_chat.prefix(addon.name .. '(debug)'):append(ashita_chat.message(text)))
 	end
 end
 
@@ -235,7 +302,9 @@ function show_status()
 end
 
 function buff_active(buff_id)
-    if T(windower.ffxi.get_player().buffs):contains(buff_id) == true then
+    local current_player_entity = ashita.ffxi.get_player_entity()
+    if not current_player_entity then return false end
+    if table_contains(current_player_entity.buffs, buff_id) then
         return true
     end
     return false
@@ -266,13 +335,17 @@ function disabled()
     return false
 end
 
-function low_mp(spell)
-	local sp = res.spells:with('en', spell)
+function low_mp(spell_name_arg)
+    local sp = resource_manager:GetSpellByName(spell_name_arg, 'en')
+	-- TODO: Verify Ashita spell object property for MP cost (e.g., sp.cost_mp).
 	if (sp == nil) then
 		return false
 	end
 
-	local mp_cost = sp.mp_cost
+    player = ashita.ffxi.get_player_entity()
+    if not player then return true end
+
+	local mp_cost = sp.cost_mp -- Changed from sp.mp_cost
     if (mp_cost == nil or (player.vitals.mp - mp_cost <= settings.mp)) then
         return true
     end
@@ -280,39 +353,62 @@ function low_mp(spell)
 	return false
 end
 
-function check_recast(spell_name)
-    local recasts = windower.ffxi.get_spell_recasts()
-	local spell = res.spells:with('en', spell_name)
-	if (spell == nil) then
+function check_recast(spell_name_arg)
+    local recasts = ashita.ffxi.get_player_recasts()
+    local spell_obj = resource_manager:GetSpellByName(spell_name_arg, 'en')
+	-- TODO: Verify Ashita spell object property for 'id' is compatible with recast table key.
+	if (spell_obj == nil) then
 		return 0
 	end
 
-	local recast = recasts[spell.id]
+	local recast = recasts[spell_obj.id]
 
     return recast
 end
 
 function get_bonus_elements()
-	-- Use best possible bonus element, default to day
-	local day_element = res.elements[res.days[windower.ffxi.get_info().day].element].en
-	local weather_id = windower.ffxi.get_info().weather
-	local player = windower.ffxi.get_player()
+    local world_info = ashita.ffxi.get_world_info()
+    local day_element_name = 'UnknownDay'
+    if world_info then
+        local vana_day_id = world_info.day_of_week -- Ashita's day_of_week is 0 (Fire) to 7 (Dark)
+        day_element_name = vanadiel_day_to_element_map[vana_day_id] or 'UnknownDay('..tostring(vana_day_id)..')'
+    else
+        day_element_name = 'ErrorGettingDay'
+    end
 
-	-- Is a storm active, it wins
-	if (#player.buffs > 0) then
-		for i=1,#player.buffs do
-			local buff = player.buffs[i]
+    local current_weather_id_from_memory = GetCurrentWeatherId()
+    local final_weather_id_for_element = current_weather_id_from_memory
 
-			for _, storm in pairs(storms) do
-				if (storm.id == buff) then
-					weather_id = storm.weather
-				end
-			end
-		end
-	end
-	weather_element = res.elements[res.weather[weather_id].element].en
+    local current_player_entity = ashita.ffxi.get_player_entity()
+    if current_player_entity and current_player_entity.buffs and #current_player_entity.buffs > 0 then
+        for _, buff_id in ipairs(current_player_entity.buffs) do
+            for _, storm_info in pairs(storms) do
+                if storm_info.id == buff_id then
+                    final_weather_id_for_element = storm_info.weather
+                    break
+                end
+            end
+            -- Consider if we should break from player buffs loop if a storm is found.
+            -- For now, last storm found dictates.
+        end
+    end
 
-	return weather_element, day_element
+    local weather_element_name = weather_id_to_element_map[final_weather_id_for_element] or 'UnknownWeather('..tostring(final_weather_id_for_element)..')'
+    if weather_element_name == 'Clear' or weather_element_name == 'Sunshine' or weather_element_name == 'Clouds' or weather_element_name == 'Fog' then
+        weather_element_name = 'NonElementalWeather'
+    end
+
+	return weather_element_name, day_element_name
+end
+
+local function GetCurrentWeatherId()
+    if weather_memory_pointer and weather_memory_pointer ~= 0 then
+        return ashita.memory.read_uint8(weather_memory_pointer)
+    end
+    -- Fallback or error
+    local world_info = ashita.ffxi.get_world_info()
+    if world_info then return world_info.weather_id end
+    return 0 -- Default to Clear if pointer not found
 end
 
 function clear_skillchain()
@@ -321,19 +417,29 @@ function clear_skillchain()
 	last_skillchain.elements = {}
 end
 
-function cast_spell(spell_cmd, target) 
-	target = windower.ffxi.get_mob_by_id(target.id)
-	if (not target.valid_target) then
+function cast_spell(spell_cmd, target_struct)
+    -- Assuming target_struct contains an 'id' field from previous logic
+    local target_entity = ashita.ffxi.get_mob_by_id(target_struct.id)
+    if not target_entity then
+        debug_message("Cast Spell: Target entity not found for ID: " .. tostring(target_struct.id))
+		finish_burst()
+		return
+    end
+
+	-- TODO: Verify Ashita entity property 'is_valid_target'.
+	if (not target_entity.is_valid_target) then
 		debug_message("Cast Spell: Target is no longer valid")
 		finish_burst()
 		return
 	end
-	if (not target.is_npc) then
+    -- TODO: Verify Ashita entity property 'is_npc'.
+	if (not target_entity.is_npc) then
 		debug_message("Cast Spell: Target is not an npc")
 		finish_burst()
 		return
 	end
-	if (target.hpp <= 0) then
+    -- TODO: Verify Ashita entity property 'hpp'.
+	if (target_entity.hpp <= 0) then
 		debug_message("Cast Spell: Target is too dead already")
 		finish_burst()
 		return
@@ -343,9 +449,9 @@ function cast_spell(spell_cmd, target)
 		message("Casting - "..spell_cmd..' for the burst!')
 	end
 	if (settings.gearswap) then
-		windower.send_command('gs c bursting')
+		ashita.ffxi.command('gs c bursting')
 	end
-	windower.send_command('input /ma "'..spell_cmd..'" <t>')
+	ashita.ffxi.command('/ma "'..spell_cmd..'" <t>') -- Removed 'input ' for Ashita command
 end
 
 function get_spell(skillchain, last_spell, second_burst, target_change)
@@ -372,16 +478,16 @@ function get_spell(skillchain, last_spell, second_burst, target_change)
 		end
 	end
 
-	if (settings.check_weather and T(skillchain.elements):contains(weather_element)) then
+	if (settings.check_weather and table_contains(skillchain.elements, weather_element)) then -- TODO: Implement table_contains or use common.lua utility
 		spell_element = weather_element
-	elseif (settings.check_day and T(skillchain.elements):contains(day_element)) then
+	elseif (settings.check_day and table_contains(skillchain.elements, day_element)) then -- TODO: Implement table_contains or use common.lua utility
 		spell_element = day_element
 	else
 		for i=1,#spell_priorities do
-			if (T(skillchain.elements):contains(spell_priorities[i].element)) then
+			if (table_contains(skillchain.elements, spell_priorities[i].element)) then -- TODO: Implement table_contains or use common.lua utility
 				spell_element = spell_priorities[i].element
 				break
-			end 
+			end
 		end
 	end
 
@@ -442,7 +548,7 @@ function get_spell(skillchain, last_spell, second_burst, target_change)
 
 	-- Display some skillchain/magic burst info, can show up whether auto bursts are on or not
 	local element_list = ''
-	local sc_info = _addon.name..': '
+	local sc_info = addon.name..': '
 
 	for i=1,#skillchain.elements do
 		element_list = element_list..skillchain.elements[i]..(i<#skillchain.elements and ', ' or '')
@@ -451,37 +557,79 @@ function get_spell(skillchain, last_spell, second_burst, target_change)
 	if (settings.show_skillchain) then sc_info = sc_info..'Skillchain effect '..skillchain.english..' ' end
 	if (settings.show_elements) then sc_info = sc_info..'['..element_list..'] ' end
 	if (settings.show_bonus_elements) then sc_info = sc_info..'Weather: '.. weather_element..' Day: '..day_element..' ' end
-	if (settings.show_skillchain or settings.show_elements or settings.show_bonus_elements) then windower.add_to_chat(207, sc_info) end
+	if (settings.show_skillchain or settings.show_elements or settings.show_bonus_elements) then print(ashita_chat.prefix(addon.name):append(ashita_chat.message(sc_info))) end
 
 	return spell
 end -- get_spell()
 
-function set_target(target)
-	local cur_target = nil
-	if (player.target_index) then
-		cur_target = windower.ffxi.get_mob_by_index(player.target_index)
-	end
+function set_target(target_to_set) -- Renamed 'target' to 'target_to_set' to avoid conflict
+    player = ashita.ffxi.get_player_entity() -- Ensure 'player' is the Ashita entity
+    if not player then return 0 end
 
-	if (target == nil or not target.valid_target or not target.is_npc or target.hpp == nil or target.hpp <= 0) then
+	local cur_target_entity = player.target_index and ashita.ffxi.get_mob_by_index(player.target_index) or nil
+
+    -- TODO: Verify Ashita entity property 'is_valid_target'.
+    -- TODO: Verify Ashita entity property 'is_npc'.
+    -- TODO: Verify Ashita entity property 'hpp'.
+	if (target_to_set == nil or not target_to_set.is_valid_target or not target_to_set.is_npc or target_to_set.hpp == nil or target_to_set.hpp <= 0) then
 		return 0
 	end
 
-	if (cur_target ~= nil and cur_target.id == target.id) then
+	if (cur_target_entity ~= nil and cur_target_entity.id == target_to_set.id) then
 		return 0
 	end
 
-	packets.inject(packets.new('incoming', 0x058, {
-		['Player'] = player.id,
-		['Target'] = target.id,
-		['Player Index'] = player.index,
-	}))
+    -- TODO: Verify the exact structure and byte packing for packet 0x058.
+    -- Assuming Player ID (4 bytes), Target ID (4 bytes), Player Index (2 bytes). Total 10 bytes.
+    -- This is a common structure for S->C Action_Target type packets where an actor targets something.
+    local packet_data = {}
+    if not player or not player.id or not player.index then
+        debug_message("Set_Target: Player or player info missing for packet construction.")
+        return 0
+    end
+    if not target_to_set or not target_to_set.id then
+        debug_message("Set_Target: Target entity or target ID missing for packet construction.")
+        return 0
+    end
+
+    local p_id_bytes = ashita.memory.uint_to_bytes(player.id)
+    local t_id_bytes = ashita.memory.uint_to_bytes(target_to_set.id)
+    local p_idx_bytes = ashita.memory.ushort_to_bytes(player.index)
+
+    -- Assuming little-endian, which is typical for FFXI and Ashita's helpers handle it.
+    for i = 1, 4 do table.insert(packet_data, p_id_bytes[i]) end
+    for i = 1, 4 do table.insert(packet_data, t_id_bytes[i]) end
+    for i = 1, 2 do table.insert(packet_data, p_idx_bytes[i]) end
+
+    -- Packet 0x058 might have more fields (e.g., action counter, often 0). If the packet is strictly 10 bytes:
+    -- If it needs to be padded to a certain size or has other fields, this will need adjustment.
+    -- For example, if there's a 2-byte action counter (e.g., 0x0000) after target_id and before player_index:
+    -- table.insert(packet_data, 0); table.insert(packet_data, 0); -- for a u_short action_count = 0
+    -- Then the player.index would follow.
+    -- For now, sticking to the 3 fields implied by the Windower code.
+
+    if packet_manager then
+        packet_manager:AddIncomingPacket(0x058, packet_data)
+    else
+        print(addon.name .. ": Error - Packet Manager not available for set_target.")
+    end
+    -- debug_message("TODO: Implement packet injection for setting target in Ashita.") -- Original debug message removed as implementation is added.
 
 	return 1
 end
 
-function do_burst(target, skillchain, second_burst, last_spell) 
-	player = windower.ffxi.get_player()
-	if (target == nil or not target.is_npc or not target.valid_target or target.hpp <= 0) then
+function do_burst(target_mob, skillchain, second_burst, last_spell) -- Renamed 'target' to 'target_mob'
+    player = ashita.ffxi.get_player_entity() -- Ensure 'player' is the Ashita entity
+    if not player then
+        debug_message("Player entity not found in do_burst.")
+        finish_burst()
+        return
+    end
+
+    -- TODO: Verify Ashita entity property 'is_npc'.
+    -- TODO: Verify Ashita entity property 'is_valid_target'.
+    -- TODO: Verify Ashita entity property 'hpp'.
+	if (target_mob == nil or not target_mob.is_npc or not target_mob.is_valid_target or target_mob.hpp <= 0) then
 		debug_message("Bad Target!")
 		finish_burst()
 		return
@@ -489,7 +637,7 @@ function do_burst(target, skillchain, second_burst, last_spell)
 
 	local target_delay = 0
 	if (settings.change_target) then
-		target_delay = set_target(target)
+		target_delay = set_target(target_mob)
 	end
 
 	local spell = get_spell(skillchain, last_spell, second_burst, target_delay >= 1)
@@ -511,26 +659,28 @@ function do_burst(target, skillchain, second_burst, last_spell)
 	end
 	
 	is_bursting = true
-	local cast_delay = math.random(0.1, settings.cast_delay)
-	coroutine.schedule(cast_spell:prepare(spell, target), target_delay + cast_delay)
+	local cast_delay_val = math.random(0.1, settings.cast_delay) -- Renamed to avoid conflict with global cast_delay
+    ashita.tasks.once(target_delay + cast_delay_val, function() cast_spell(spell, target_mob) end)
 
 	if (settings.double_burst and not second_burst) then
 		debug_message("Setting up double burst")
-		local cast_time = res.spells:with('en', spell) and res.spells:with('en', spell).cast_time or nil
+        local spell_obj = resource_manager:GetSpellByName(spell, 'en')
+		local cast_time = spell_obj and spell_obj.cast_time or nil -- TODO: Verify Ashita spell object property for 'cast_time'.
 		if (cast_time == nil) then
 			finish_burst()
 			return
 		end
 		local d = cast_time + settings.double_burst_delay + target_delay + 1
-		coroutine.schedule(do_burst:prepare(target, skillchain, true, spell), d)
+        ashita.tasks.once(d, function() do_burst(target_mob, skillchain, true, spell) end)
 	else
-		local cast_time = res.spells:with('en', spell) and res.spells:with('en', spell).cast_time or nil
+        local spell_obj = resource_manager:GetSpellByName(spell, 'en')
+		local cast_time = spell_obj and spell_obj.cast_time or nil -- TODO: Verify Ashita spell object property for 'cast_time'.
 		if (cast_time == nil) then
 			finish_burst()
 			return
 		end
 		local d = cast_time + target_delay
-		coroutine.schedule(finish_burst, d)
+        ashita.tasks.once(d, function() finish_burst() end)
 	end
 end
 
@@ -538,13 +688,34 @@ function finish_burst()
 	is_bursting = false
 	debug_message("Finished Burst, clearing chain and telling gearswap")
 	if (settings.gearswap) then
-		windower.send_command('gs c notbursting')
+		ashita.ffxi.command('gs c notbursting')
 	end
 	clear_skillchain()
 end
 
---[[ Windower Events ]]--
-windower.register_event('prerender', function(...)
+--[[ Ashita Events ]]--
+local function autoMB_load()
+    local signature_offset = ashita.memory.find('FFXiMain.dll', 0, '66A1????????663D????72', 0, 0)
+    if signature_offset > 0 then
+        weather_memory_pointer = ashita.memory.read_uint32(signature_offset + 0x02)
+        if weather_memory_pointer == 0 then
+            print(addon.name .. ': Warning - Found weather signature but pointer was null.')
+        else
+            -- Optional: print(addon.name .. ': Weather memory pointer initialized.')
+        end
+    else
+        print(addon.name .. ': Error - Could not find memory signature for weather pointer.')
+    end
+    -- Potentially call handle_job_change here if needed on load, after getting player info
+    -- local player_entity = ashita.ffxi.get_player_entity()
+    -- if player_entity and player_entity.main_job_id and player_entity.sub_job_id then
+    --    handle_job_change(player_entity.main_job_id, player_entity.main_job_level, player_entity.sub_job_id, player_entity.sub_job_level)
+    -- end
+end
+ashita.events.register('load', 'autoMB_load', autoMB_load)
+
+
+ashita.events.register('d3d_present', 'autoMB_d3d_present', function()
 	local time = os.clock()
 	local delta_time = time - last_check_time
 	last_check_time = time
@@ -555,8 +726,8 @@ windower.register_event('prerender', function(...)
 end)
 
 -- Check for skillchain effects applied, this can get wonky if/when a group is skillchaining on multiple mobs at once
-windower.register_event('incoming chunk', function(id, packet, data, modified, is_injected, is_blocked)
-	if (id ~= 0x28 or not active) then
+ashita.events.register('packet_in', 'autoMB_packet_in', function(e)
+	if (e.id ~= 0x28 or not active) then
 		return
 	end
 	local now = os.clock()
@@ -565,120 +736,195 @@ windower.register_event('incoming chunk', function(id, packet, data, modified, i
 	end
 	last_packet_time = now
 
-	local actions_packet = windower.packets.parse_action(packet)
-	local mob_array = windower.ffxi.get_mob_array()
-	local valid = false
-	local party = windower.ffxi.get_party()
-	local party_ids = T{}
+    if not struct then
+        debug_message("Struct library not available, cannot parse packet 0x028.")
+        return
+    end
 
-	player = windower.ffxi.get_player()
+    -- TODO: VERIFY ALL OFFSETS AND DATA TYPES FOR PACKET 0x028
+    -- These offsets are 1-based for string.byte and struct.unpack.
+    local OFFSET_ACTOR_ID = 5  -- 0-idx 4: Actor ID (4 bytes)
+    local OFFSET_TARGET_COUNT = 9 -- 0-idx 8: Number of targets (1 byte). This is often part of the main action header.
+                                  -- Note: Windower's `data:unpack('C', 20)` was likely for a specific interpretation where target count is further in.
+                                  -- A common 0x028 structure has actor ID, then some flags/category/param, then target count, then targets.
+                                  -- Let's try a more standard interpretation first for target count.
 
-	if (data:unpack('I', 6) == player.id) then 
-		local category, param = data:unpack( 'b4b16', 11, 3)
-		local recast, targ_id = data:unpack('b32b32', 15, 7)
-		local effect, message = data:unpack('b17b10', 27, 6)
-		
-		if start_act:contains(category) then
-			if param == 24931 then                  -- Begin Casting/WS/Item/Range
-				is_busy = 0
-				is_casting = true
-			elseif param == 28787 then              -- Failed Casting/WS/Item/Range
-				is_casting = false
-				is_busy = failed_cast_delay
-			end
-		elseif category == 6 then                   -- Use Job Ability
-			is_busy = ability_delay
-		elseif category == 4 then                   -- Finish Casting
-			is_busy = after_cast_delay
-			is_casting = false
-		elseif finish_act:contains(category) then   -- Finish Range/WS/Item Use
-			is_busy = 0
-			is_casting = false
-		end
-	end
+    -- For player's own action (when actor_id is self)
+    local OFFSET_SELF_ACTION_CATEGORY = 11 -- 0-idx 10: Main Action Category (1 byte)
+    local OFFSET_SELF_ACTION_PARAM = 12    -- 0-idx 11: Main Action Parameter (uShort, 2 bytes)
 
-	if (is_bursting) then
-		debug_message("Bursting: "..(is_bursting and "Yes" or "No").." Casting: "..(is_casting and "Yes" or "No").." Busy: "..is_busy.." second(s)")
-		return
-	end
+    -- For target blocks (iterating target_count times)
+    local OFFSET_FIRST_TARGET_BLOCK_START = 28 -- Speculative: Start of the first target's data block.
+                                               -- This must be *after* the main header fields.
+    local TARGET_ID_SIZE = 4
+    local TARGET_EFFECT_MSG_SIZE = 1
+    -- Stride to get to the *start* of the next target's ID, assuming a minimal block of ID + effect message.
+    -- This is highly simplified. Real 0x028 target blocks are complex and variable.
+    local TARGET_BLOCK_STRIDE = TARGET_ID_SIZE + TARGET_EFFECT_MSG_SIZE -- Minimal stride (5 bytes)
+    local OFFSET_ADD_EFFECT_MSG_RELATIVE = TARGET_ID_SIZE -- 0-idx from start of target_id to its effect message byte (i.e. byte after ID)
 
-	-- Get ids of all current party member
-	for _, member in pairs (party) do
-		if (type(member) == 'table' and member.mob) then
-			party_ids:append(member.mob.id)
-		end
-	end
+    if not e.data_raw or #e.data_raw < 20 then -- Minimum length for basic header fields up to a potential target count.
+        debug_message("Packet 0x028 too short for initial parsing or data_raw missing.")
+        return
+    end
 
-	local cur_t = windower.ffxi.get_mob_by_target('t')
-	local bt = windower.ffxi.get_mob_by_target('bt')
+    local actor_id = struct.unpack("<I", e.data_raw, OFFSET_ACTOR_ID)
+    local target_count = string.byte(e.data_raw, OFFSET_TARGET_COUNT)
 
-	for _, target in pairs(actions_packet.targets) do
-		local t = windower.ffxi.get_mob_by_id(target.id)
-		if (t == nil) then
-			debug_message("No target from packet")
-			return
-		end
-		-- Make sure the mob is a valid MB target
-		if (t.valid_target and t.is_npc) then
-			for _, action in pairs(target.actions) do
-				if (skillchains[action.add_effect_message]) then
-					-- Don't MB targets that aren't claimed by us ... this might be meh
-					debug_message("Mob ("..t.name..") claim ID: "..t.claim_id.." in alliance? "..(party_ids:contains(t.claim_id) and "Yes" or "No"))
-					if  (not party_ids:contains(t.claim_id)) then
-						return
-					end
-					-- Don't MB targets too far away
-					if (t.distance:sqrt() < settings.cast_range) then
-						debug_message("Skillchain effect detected on "..t.name)
-						last_skillchain = skillchains[action.add_effect_message]
-						coroutine.schedule(do_burst:prepare(t, last_skillchain, false, '', 0), settings.cast_delay + is_busy)
-					else
-						debug_message("Target ("..t.name..") out of range "..t.distance:sqrt().."' Max MB Range: "..settings.cast_range.."'")
-					end
-				end
-			end
-		end
-	end
+    player = ashita.ffxi.get_player_entity()
+
+    if player and actor_id == player.id then
+        -- This is an action by the player themself. Update is_busy, is_casting.
+        -- TODO: VERIFY OFFSETS for player's own action category and param.
+        if #e.data_raw >= (OFFSET_SELF_ACTION_PARAM + 1) then -- Ensure packet is long enough for these fields
+            local self_action_category = string.byte(e.data_raw, OFFSET_SELF_ACTION_CATEGORY)
+            local self_action_param = struct.unpack("<H", e.data_raw, OFFSET_SELF_ACTION_PARAM)
+
+            if table_contains(start_act, self_action_category) then
+                if self_action_param == 24931 then -- Begin Casting/WS/Item/Range
+                    is_busy = 0
+                    is_casting = true
+                elseif self_action_param == 28787 then -- Failed Casting/WS/Item/Range
+                    is_casting = false
+                    is_busy = failed_cast_delay
+                end
+            elseif self_action_category == 6 then -- Use Job Ability
+                is_busy = ability_delay
+            elseif self_action_category == 4 then -- Finish Casting
+                is_busy = after_cast_delay
+                is_casting = false
+            elseif table_contains(finish_act, self_action_category) then -- Finish Range/WS/Item Use
+                is_busy = 0
+                is_casting = false
+            end
+        else
+            debug_message("Player action packet 0x028 too short for category/param.")
+        end
+    end
+
+    if is_bursting then
+        -- debug_message("Bursting: "..(is_bursting and "Yes" or "No").." Casting: "..(is_casting and "Yes" or "No").." Busy: "..is_busy.." second(s)")
+        return
+    end
+
+    if target_count and target_count > 0 then
+        -- Calculate where action details might start *after* all target blocks.
+        -- This is needed if OFFSET_SELF_ACTION_CATEGORY/PARAM are relative to this point for non-player actor packets.
+        -- However, for skillchain detection, we are interested in effects *on* targets.
+
+        -- The crucial part is the structure of each target's data block and the actions within it.
+        -- Windower's `actions_packet.targets[idx].actions[idx2].add_effect_message` implies a nested structure.
+        -- A common 0x028 format: Header -> TargetCount -> [TargetID, NumSubActions, [ActionType, ActionParam, ActionMessage]...]
+        -- The simplified loop below assumes the add_effect_message is at a fixed relative offset from TargetID,
+        -- which is often true for the *primary* additional effect like skillchains.
+
+        -- TODO: VERIFY OFFSET_FIRST_TARGET_BLOCK_START and TARGET_BLOCK_STRIDE
+        -- These are highly speculative.
+        if #e.data_raw < (OFFSET_FIRST_TARGET_BLOCK_START + (target_count * TARGET_BLOCK_STRIDE) - TARGET_BLOCK_STRIDE + OFFSET_ADD_EFFECT_MSG_RELATIVE) then
+            debug_message("Packet 0x028 too short for all declared targets and effects.")
+            return
+        end
+
+        for i = 0, target_count - 1 do
+            local target_base_offset = OFFSET_FIRST_TARGET_BLOCK_START + (i * TARGET_BLOCK_STRIDE)
+
+            local target_id = struct.unpack("<I", e.data_raw, target_base_offset)
+            -- The add_effect_message_id is the byte immediately after the 4-byte target_id in this simplified model.
+            local add_effect_message_id = string.byte(e.data_raw, target_base_offset + OFFSET_ADD_EFFECT_MSG_RELATIVE)
+
+            if skillchains[add_effect_message_id] then
+                local target_entity = ashita.ffxi.get_mob_by_id(target_id)
+                if target_entity then
+                    -- TODO: Verify Ashita entity properties: is_npc, claim_id, distance, name
+                    if target_entity.is_npc then
+                        -- TODO: Party/Claim Check. For now, let's assume we burst on any valid NPC target.
+                        -- This needs refinement to avoid bursting on mobs not engaged by player/party.
+                        if target_entity.distance and target_entity.distance < settings.cast_range then
+                            debug_message("Skillchain effect " .. skillchains[add_effect_message_id].english .. " detected on " .. (target_entity.name or "Unknown Target"))
+                            last_skillchain = skillchains[add_effect_message_id]
+                            local delay_for_burst = settings.cast_delay + is_busy -- is_busy should be updated by player's own actions
+                            ashita.tasks.once(delay_for_burst, function() do_burst(target_entity, last_skillchain, false, '', 0) end)
+                            break -- Act on first valid skillchain target
+                        else
+                            debug_message("Target (" .. (target_entity.name or "Unknown Target") .. ") for skillchain out of range (" .. string.format("%.2f", target_entity.distance) .. "y).")
+                        end
+                    end
+                else
+                    debug_message("Skillchain effect on unknown target ID: " .. target_id)
+                end
+            end
+        end
+    end
 end)
 
--- Change spell type based on job/sub
-windower.register_event('job change', function(main_id, main_lvl, sub_id, sub_lvl)
-	local main = res.jobs[main_id].english_short
-	local sub = res.jobs[sub_id].english_short
+local function handle_job_change()
+    local p_entity = ashita.ffxi.get_player_entity()
+    if not p_entity then
+        print(addon.name .. ": Could not get player entity in handle_job_change.")
+        return
+    end
+
+    local main_job_id = p_entity.main_job_id -- TODO: Verify property name for main_job_id
+    local main_job_lvl = p_entity.main_job_level -- TODO: Verify property name for main_job_level
+    local sub_job_id = p_entity.sub_job_id -- TODO: Verify property name for sub_job_id
+    local sub_job_lvl = p_entity.sub_job_level -- TODO: Verify property name for sub_job_level
+
+    -- Ensure these are not nil before proceeding, provide defaults if necessary
+    main_job_id = main_job_id or 0
+    main_job_lvl = main_job_lvl or 0
+    sub_job_id = sub_job_id or 0
+    sub_job_lvl = sub_job_lvl or 0
+
+    local main_job_obj = resource_manager:GetJobById(main_job_id) -- Use main_job_id (was main_job_id_arg)
+    local main = main_job_obj and main_job_obj.short_name_en or "UNK" -- TODO: Verify Ashita job object property for short English name (e.g., short_name_en, abbr_en).
+    local sub_job_obj = resource_manager:GetJobById(sub_job_id)     -- Use sub_job_id (was sub_job_id_arg)
+    local sub = sub_job_obj and sub_job_obj.short_name_en or "UNK" -- TODO: Verify Ashita job object property for short English name.
 
 	-- Set settings.cast_type to 'none' to stop casting if job/sub doesn't support casting
 	settings.cast_type = 'none'
 
-	if (T(spell_users):contains(main)) then
+	if (table_contains(spell_users, main)) then
 		settings.cast_type = 'spell'
-	elseif (T(jutsu_users):contains(main)) then
+	elseif (table_contains(jutsu_users, main)) then
 		settings.cast_type = 'jutsu'
-	elseif (T(helix_users):contains(main)) then
+	elseif (table_contains(helix_users, main)) then
 		settings.cast_type = 'spell'
-	elseif (T(spell_users):contains(sub)) then
+	elseif (table_contains(spell_users, sub)) then
 		settings.cast_type = 'spell'
-	elseif (T(jutsu_users):contains(sub)) then
+	elseif (table_contains(jutsu_users, sub)) then
 		settings.cast_type = 'jutsu'
-	elseif (T(helix_users):contains(sub)) then
+	elseif (table_contains(helix_users, sub)) then
 		settings.cast_type = 'spell'
 	end
 	message('> Cast type set to: '..settings.cast_type)
-end)
+end
 
 -- Stop checking if logout happens or zoning and disable on zone is true
-windower.register_event('zone change', 'logout', function(...)
-	windower.send_command('autoMB off')
-	player = nil
+ashita.events.register('zone_change', 'autoMB_zone_change', function(e)
+	ashita.ffxi.command('/autommb off')
+	player = nil -- Clear global player cache
+    handle_job_change() -- Update cast type based on new zone/job info
 	return
 end)
 
 -- 
 -- Process incoming commands
-windower.register_event('addon command', function(...)
-	local cmd = 'none'
-	if (#arg > 0) then
-		cmd = arg[1]
-	end
+ashita.events.register('command', 'autoMB_command', function(e)
+    local raw_arg_list = string_split(e.command, ' ')
+    local command_name = raw_arg_list[1] -- This is the typed command itself, e.g., /autommb
+
+    -- Filter for our addon's commands
+    if command_name ~= '/autommb' and command_name ~= '/amb' then
+        return
+    end
+    e.blocked = true -- Block the command if it's for us
+
+    local args = {} -- Create a 1-based args table for compatibility with old code
+    for i = 2, #raw_arg_list do
+        table.insert(args, raw_arg_list[i])
+    end
+	local cmd = args[1] or 'none'
+
 
 	if (cmd == 'test') then
 		local test_skillchain = {}
@@ -687,7 +933,7 @@ windower.register_event('addon command', function(...)
 		test_skillchain.english = 'Test Chain'
 		test_skillchain.elements = {'Earth','Light','Fire', 'Ice'}
 		test_spell = get_spell(test_skillchain, nil, false, true)
-		message('Test Spell: '..test_spell ~= nil and test_spell or 'Not Found')
+		message('Test Spell: '..(test_spell ~= nil and test_spell or 'Not Found'))
 		return
 	elseif (cmd == 'help') then
 		show_help()
@@ -695,38 +941,38 @@ windower.register_event('addon command', function(...)
 	elseif (cmd == 'status' or cmd == 'show') then
 		show_status()
 		return
-	elseif (cmd == "none") then
+	elseif (cmd == "none") then -- This typically means just `/amb` or `/autommb` was typed
 		active = not active
-		windower.add_to_chat(207, 'AutoMB '..(acitve and 'activating' or 'deactivating'))
-		player = windower.ffxi.get_player()
+		print(ashita_chat.prefix(addon.name):append(ashita_chat.message('AutoMB '..(active and 'activating' or 'deactivating'))))
+		player = ashita.ffxi.get_player_entity()
 		last_check_time = os.clock()
         return
-	elseif (T{"on","start","run","go"}:contains(cmd)) then
+	elseif (table_contains({"on","start","run","go"}, cmd)) then
 		active = true
-		windower.add_to_chat(207, 'AutoMB activating')
-		player = windower.ffxi.get_player()
+		print(ashita_chat.prefix(addon.name):append(ashita_chat.message('AutoMB activating')))
+		player = ashita.ffxi.get_player_entity()
 		last_check_time = os.clock()
         return
-    elseif (T{"on","start","run","go"}:contains(cmd)) then
+    elseif (table_contains({"off","stop","end"}, cmd)) then
         active = false
-        windower.add_to_chat(207, 'AutoMB deactivating')
+        print(ashita_chat.prefix(addon.name):append(ashita_chat.message('AutoMB deactivating')))
 		return
 	elseif (cmd == 'cast' or cmd == 'c') then
-		if (#arg < 2) then
-			windower.add_to_chat(207, "Usage: autoMB cast spell|helix|jutsu\nTells AutoMB what magic type to try to cast if the default is not what you want.")
+		if (#args < 2) then
+			print(ashita_chat.prefix(addon.name):append(ashita_chat.message("Usage: autoMB cast spell|helix|jutsu\nTells AutoMB what magic type to try to cast if the default is not what you want.")))
 		end
-		if (T(cast_types):contains(arg[2]:lower())) then
-			settings.cast_type = arg[2]:lower()
+		if (#args >= 2 and table_contains(cast_types, args[2]:lower())) then
+			settings.cast_type = args[2]:lower()
 		end
-		windower.add_to_chat(207, "Cast Type set to "..settings.cast_type)
-		settings:save()
+		print(ashita_chat.prefix(addon.name):append(ashita_chat.message("Cast Type set to "..settings.cast_type)))
+		settings_manager.save(settings)
 		return
 	elseif (cmd == 'tier' or cmd == 't') then
-		if (#arg < 2) then
-			windower.add_to_chat(207, "Usage: tier 1~6\nTells autoMB what tier spell to use for Ninjutsu 1~3 will become ichi|ni|san.")
+		if (#args < 2) then
+			print(ashita_chat.prefix(addon.name):append(ashita_chat.message("Usage: tier 1~6\nTells autoMB what tier spell to use for Ninjutsu 1~3 will become ichi|ni|san.")))
 			return
 		end
-		local t = tonumber(arg[2])
+		local t = tonumber(args[2])
 		if (settings.cast_type == 'jutsu') then
 			if (t > 0 and t < 4) then
 				settings.cast_tier = t
@@ -736,83 +982,83 @@ windower.register_event('addon command', function(...)
 				settings.cast_tier = t
 			end		
 		end
-		message("Cast Tier set to: "..t.." ["..(settings.cast_type == 'jutsu' and jutsu_tiers[settings.cast_tier].suffix or magic_tiers[settings.cast_tier].suffix).."]")
-		settings:save()
+		message("Cast Tier set to: "..t.." ["..(settings.cast_type == 'jutsu' and jutsu_tiers[settings.cast_tier] and jutsu_tiers[settings.cast_tier].suffix or magic_tiers[settings.cast_tier] and magic_tiers[settings.cast_tier].suffix or "Unknown Tier").."]")
+		settings_manager.save(settings)
 		return
 	elseif (cmd == 'range' or cmd == 'rng') then
-		if (#arg < 2) then
-			windower.add_to_chat(207, "Usage: autoMB ##\nTells AutoMB what the max cast range to target is (default is 22).")
+		if (#args < 2) then
+			print(ashita_chat.prefix(addon.name):append(ashita_chat.message("Usage: autoMB ##\nTells AutoMB what the max cast range to target is (default is 22).")))
 		end
 
-		settings.cast_range = tonumber(arg[2]) and tonumber(arg[2]) or 22
-		windower.add_to_chat(207, "Cast Range set to "..settings.cast_range)
-		settings:save()
+		settings.cast_range = tonumber(args[2]) and tonumber(args[2]) or 22
+		print(ashita_chat.prefix(addon.name):append(ashita_chat.message("Cast Range set to "..settings.cast_range)))
+		settings_manager.save(settings)
 		return
 	elseif (cmd == 'mp') then
-		local n = tonumber(arg[2])
+		local n = tonumber(args[2])
 		if (n == nil or n < 0) then
-			windower.add_to_chat(207, "Usage: autoMB mp #")
+			print(ashita_chat.prefix(addon.name):append(ashita_chat.message("Usage: autoMB mp #")))
 			return
 		end
 		settings.mp = n
-		windower.add_to_chat(207, "Cast Min MP set to "..settings.mp)
-		settings:save()
+		print(ashita_chat.prefix(addon.name):append(ashita_chat.message("Cast Min MP set to "..settings.mp)))
+		settings_manager.save(settings)
 		return
 	elseif (cmd == 'delay' or cmd == 'd') then
-		local n = tonumber(arg[2])
+		local n = tonumber(args[2])
 		if (n == nil or n < 0) then
-			windower.add_to_chat(207, "Usage: autoMB delay #")
+			print(ashita_chat.prefix(addon.name):append(ashita_chat.message("Usage: autoMB delay #")))
 			return
 		end
 		settings.cast_delay = n
-		windower.add_to_chat(207, "Cast Delay set to "..settings.cast_delay)
-		settings:save()
+		print(ashita_chat.prefix(addon.name):append(ashita_chat.message("Cast Delay set to "..settings.cast_delay)))
+		settings_manager.save(settings)
 		return
 	elseif (cmd == 'frequency' or cmd == 'f') then
-		local n = tonumber(arg[2])
+		local n = tonumber(args[2])
 		if (n == nil or n < 0) then
-			windower.add_to_chat(207, "Usage: autoMB (f)requency #")
+			print(ashita_chat.prefix(addon.name):append(ashita_chat.message("Usage: autoMB (f)requency #")))
 			return
 		end
 		settings.frequency = n
-		windower.add_to_chat(207, "Check Frequency set to "..settings.frequency.." times per second")
-		settings:save()
+		print(ashita_chat.prefix(addon.name):append(ashita_chat.message("Check Frequency set to "..settings.frequency.." times per second")))
+		settings_manager.save(settings)
 		return
 	elseif (cmd == 'doubleburst' or cmd == 'double' or cmd == 'dbl') then
 		settings.double_burst = not settings.double_burst
-		windower.add_to_chat(207, "Double Bursting set to "..(settings.double_burst and "True" or "False"))
-		settings:save()
+		print(ashita_chat.prefix(addon.name):append(ashita_chat.message("Double Bursting set to "..(settings.double_burst and "True" or "False"))))
+		settings_manager.save(settings)
 		return
 	elseif (cmd == 'doubleburstdelay' or cmd == 'doubledelay' or cmd == 'dbldelay' or cmd == 'dbld') then
-		local n = tonumber(arg[2])
+		local n = tonumber(args[2])
 		if (n == nil or n < -10 or n > 10) then
-			windower.add_to_chat(207, "Usage: autoMB doubleburstdelay [-10..10]")
+			print(ashita_chat.prefix(addon.name):append(ashita_chat.message("Usage: autoMB doubleburstdelay [-10..10]")))
 			return
 		end
 		settings.double_burst_delay = n
-		windower.add_to_chat(207, "Double Burst Delay set to "..settings.double_burst_delay)
-		settings:save()
+		print(ashita_chat.prefix(addon.name):append(ashita_chat.message("Double Burst Delay set to "..settings.double_burst_delay)))
+		settings_manager.save(settings)
 		return
 	elseif (cmd == 'weather') then
 		settings.check_weather = not settings.check_weather
 		message('Will'..(settings.check_weather and ' ' or ' not ')..'use current weather bonuses')
-		settings:save()
+		settings_manager.save(settings)
 		return
 	elseif (cmd == 'day') then
 		settings.check_day = not settings.check_day
 		message('Will'..(settings.check_day and ' ' or ' not ')..'use current day bonuses')
-		settings:save()
+		settings_manager.save(settings)
 		return
 	elseif (cmd == 'toggle' or cmd == 'tog') then
 		local what = 'all'
 		local toggle = 'toggle'
 
-		if (#arg > 1) then
-			what = arg[2]:lower()
+		if (#args > 1) then
+			what = args[2]:lower()
 		end
 
-		if (#arg > 2) then
-			toggle = arg[3]:lower()
+		if (#args > 2) then
+			toggle = args[3]:lower()
 		end
 
 		-- Show/Hide skillchain name/elements and spell(s) to be cast
@@ -822,7 +1068,7 @@ windower.register_event('addon command', function(...)
 			else
 				settings.show_skillchain = (toggle == 'on')
 			end
-			windower.add_to_chat(207, 'AutoMB: Skillchain info will be '..(settings.show_skillchain == true and 'shown' or 'hidden'))
+			print(ashita_chat.prefix(addon.name):append(ashita_chat.message('AutoMB: Skillchain info will be '..(settings.show_skillchain == true and 'shown' or 'hidden'))))
         end
 		
 		if (what == 'elements' or what == 'element' or what == 'all') then
@@ -831,7 +1077,7 @@ windower.register_event('addon command', function(...)
 			else
 				settings.show_elements = (toggle == 'on')
 			end
-			windower.add_to_chat(207, 'AutoMB: Skillchain element info will be '..(settings.show_elements == true and 'shown' or 'hidden'))
+			print(ashita_chat.prefix(addon.name):append(ashita_chat.message('AutoMB: Skillchain element info will be '..(settings.show_elements == true and 'shown' or 'hidden'))))
         end
 
 		if (what == 'weather' or what == 'bonus' or what == 'all') then
@@ -840,7 +1086,7 @@ windower.register_event('addon command', function(...)
 			else
 				settings.show_bonus_elements = (toggle == 'on')
 			end
-			windower.add_to_chat(207, 'AutoMB: Day/Weather element info will be '..(settings.show_bonus_elements == true and 'shown' or 'hidden'))
+			print(ashita_chat.prefix(addon.name):append(ashita_chat.message('AutoMB: Day/Weather element info will be '..(settings.show_bonus_elements == true and 'shown' or 'hidden'))))
         end
 
 		if (what == 'spell' or what == 'sp' or what == 'all') then
@@ -849,10 +1095,10 @@ windower.register_event('addon command', function(...)
 			else
 				settings.show_spell = (toggle == 'on')
 			end
-			windower.add_to_chat(207, 'AutoMB: Spell info will be '..(settings.show_spell == true and 'shown' or 'hidden'))
+			print(ashita_chat.prefix(addon.name):append(ashita_chat.message('AutoMB: Spell info will be '..(settings.show_spell == true and 'shown' or 'hidden'))))
 		end
 
-		settings:save()
+		settings_manager.save(settings)
 		return
 	elseif (cmd == 'stepdown' or cmd == 'sd') then
 		local txt = ''
@@ -867,7 +1113,7 @@ windower.register_event('addon command', function(...)
 			txt = 'never'
 		end
 		message("Double burst Step Down set to "..txt)
-		settings:save()
+		settings_manager.save(settings)
 		return
 	elseif (cmd == 'gearswap' or cmd == 'gs') then
 		if (settings.gearswap) then
@@ -876,7 +1122,7 @@ windower.register_event('addon command', function(...)
 			settings.gearswap = true
 		end
 		message("Will "..(settings.gearswap and '' or ' not ').."use 'gs c bursting' and 'gs c notbursting'")
-		settings:save()
+		settings_manager.save(settings)
 		return
 	elseif (cmd == 'target' or cmd == 'tgt') then
 		if (settings.change_target == nil) then
@@ -884,12 +1130,12 @@ windower.register_event('addon command', function(...)
 		end
 		settings.change_target = not settings.change_target
 		message("Auto target swapping "..(settings.change_target and 'enabled' or 'disabled')..".")
-		settings:save()
+		settings_manager.save(settings)
 		return
 	elseif (cmd == 'zone' or cmd == 'z') then
 		settings.disable_on_zone = settings.disable_on_zone and (not settings.disable_on_zone) or true
 		message("Auto MB will be "..(settings.disable_on_zone and 'enabled' or 'disabled').." when zoning.")
-		settings:save()
+		settings_manager.save(settings)
 		return
 	elseif (cmd == 'debug') then
 		debug = not debug

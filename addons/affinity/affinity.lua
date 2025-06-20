@@ -66,7 +66,7 @@ end
 * event: command
 * desc : Event called when the addon is processing a command.
 --]]
-ashita.events.register('command', 'command_cb', function (e)
+ashita.events.register('command', 'affinity_command', function (e)
     -- Parse the command arguments..
     local args = e.command:args();
     if (#args == 0 or args[1] ~= '/affinity') then
